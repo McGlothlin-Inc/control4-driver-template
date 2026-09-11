@@ -1003,6 +1003,92 @@ function c2f(c)
   return round(f, 1)
 end
 
+--- Temperature scale spellings seen on VALUE_CHANGED and on the thermostat
+--- proxy, reduced to a letter. The proxy sends "C"/"F", sensor bindings send
+--- the whole word, and C4:GetTemperatureScale() returns the whole word.
+--- @type table<string, string>
+local TEMPERATURE_SCALES = {
+  C = "C",
+  CELSIUS = "C",
+  F = "F",
+  FAHRENHEIT = "F",
+  K = "K",
+  KELVIN = "K",
+}
+
+--- Reduce a scale to "C", "F" or "K", or nil when it does not name a
+--- temperature (e.g. "PERCENT").
+--- @param scale string|nil The scale as it appears on the wire.
+--- @return string|nil letter
+function TemperatureScaleLetter(scale)
+  if type(scale) ~= "string" then
+    return nil
+  end
+  return TEMPERATURE_SCALES[scale:upper()]
+end
+
+--- Convert a temperature to Celsius from the scale it was reported in.
+--- @param value number The temperature.
+--- @param scale string|nil The scale of `value`; not a temperature scale yields nil.
+--- @return number|nil celsius
+function ToCelsius(value, scale)
+  if type(value) ~= "number" then
+    return nil
+  end
+  local letter = TemperatureScaleLetter(scale)
+  if letter == "C" then
+    return value
+  elseif letter == "F" then
+    return f2c(value)
+  elseif letter == "K" then
+    return round(value - 273.15, 1)
+  end
+  return nil
+end
+
+--- Build the VALUE_CHANGED params for a sensor binding.
+---
+--- C4-THERM reads a bound sensor from CELSIUS, requires TIMESTAMP, and drops
+--- readings older than 15 minutes; VALUE/SCALE consumers read the rest. VALUE
+--- stays in the measured scale so existing consumers are unaffected.
+--- @param value number The measured value.
+--- @param scale string|nil The scale of `value` (e.g. "CELSIUS", "PERCENT").
+--- @return table params
+function SensorValueParams(value, scale)
+  local params = {
+    VALUE = value,
+    SCALE = scale,
+    TIMESTAMP = os.time(),
+  }
+  local celsius = ToCelsius(value, scale)
+  if celsius ~= nil then
+    params.CELSIUS = celsius
+    params.FAHRENHEIT = c2f(celsius)
+  end
+  return params
+end
+
+--- Read a Celsius temperature out of VALUE_CHANGED params, accepting every key
+--- convention in use: CELSIUS, FAHRENHEIT, or VALUE carrying a SCALE.
+--- @param tParams table|nil The params as received.
+--- @param defaultScale string The scale to read VALUE in when SCALE is absent. Sensor bindings report Celsius; the thermostat proxy sends Fahrenheit.
+--- @return number|nil celsius
+function CelsiusFromParams(tParams, defaultScale)
+  local celsius = tonumber_expect_period(Select(tParams, "CELSIUS"))
+  if celsius ~= nil then
+    return celsius
+  end
+  local fahrenheit = tonumber_expect_period(Select(tParams, "FAHRENHEIT"))
+  if fahrenheit ~= nil then
+    return f2c(fahrenheit)
+  end
+  local value = tonumber_expect_period(Select(tParams, "VALUE"))
+  if value == nil then
+    return nil
+  end
+  return ToCelsius(value, Select(tParams, "SCALE") or defaultScale)
+end
+
 --------------------------------------------------------------------------------
 -- Binary-safe serialization
 --------------------------------------------------------------------------------
