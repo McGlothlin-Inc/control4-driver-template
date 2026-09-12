@@ -627,6 +627,48 @@ end)
 ShimResetEvents()
 T.eq("reset clears every declaration", next(ShimEvents()), nil)
 
+T.section("C4:ParseXml")
+--------------------------------------------------------------------------------
+
+-- The shape thermostatV2 hands a driver in SET_PRESETS: a list whose per-preset
+-- field values ride as escaped XML inside an attribute.
+local presetsXml = '<?xml version="1.0"?><!-- proxy --><presets>'
+  .. '<preset name="Night" preset_fields="&lt;fields&gt;&lt;field id=&quot;setpoint_c&quot;&gt;20&lt;/field&gt;&lt;/fields&gt;"/>'
+  .. "<preset name='Day &amp; Evening' previous_name=\"Day\"><note>kept</note></preset>"
+  .. "</presets>"
+
+local root = C4:ParseXml(presetsXml)
+T.check("returns the root node", root ~= nil and root.Name == "presets", root and root.Name)
+T.check("strips the prolog and comments", root ~= nil and #root.ChildNodes == 2, root and #root.ChildNodes)
+
+local night = root and root.ChildNodes[1]
+T.check("keeps child order", night ~= nil and night.Name == "preset" and night.Attributes.name == "Night")
+T.check("a self-closing node has no children", night ~= nil and #night.ChildNodes == 0)
+T.check(
+  "unescapes an attribute so nested XML is re-parsable",
+  night ~= nil and night.Attributes.preset_fields == '<fields><field id="setpoint_c">20</field></fields>',
+  night and night.Attributes.preset_fields
+)
+local fields = night and C4:ParseXml(night.Attributes.preset_fields)
+T.check("the nested XML parses in turn", fields ~= nil and fields.ChildNodes[1].Attributes.id == "setpoint_c")
+
+local day = root and root.ChildNodes[2]
+T.check(
+  "single-quoted attributes and entities",
+  day ~= nil and day.Attributes.name == "Day & Evening",
+  day and day.Attributes.name
+)
+T.check("double-quoted attributes on the same node", day ~= nil and day.Attributes.previous_name == "Day")
+T.check("child nodes of a paired tag", day ~= nil and #day.ChildNodes == 1 and day.ChildNodes[1].Name == "note")
+
+local nested = C4:ParseXml("<a><a><b/></a><b/></a>")
+T.check("same-name nesting closes at the matching depth", nested ~= nil and #nested.ChildNodes == 2)
+T.check("the inner node keeps its own child", nested ~= nil and #nested.ChildNodes[1].ChildNodes == 1)
+
+T.check("the C4.ParseXml(C4, xml) calling style works", C4.ParseXml(C4, "<x/>").Name == "x")
+T.check("an empty string yields nil", C4:ParseXml("") == nil)
+T.check("a non-string yields nil", C4:ParseXml(nil) == nil)
+
 --------------------------------------------------------------------------------
 
 T.finish()
