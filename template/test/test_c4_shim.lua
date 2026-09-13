@@ -705,6 +705,25 @@ T.check(
   pairedWithGt ~= nil and #pairedWithGt.ChildNodes == 1 and pairedWithGt.ChildNodes[1].Name == "c"
 )
 
+-- Numeric character reference tests
+local eacute = C4:ParseXml("<v>&#233;</v>")
+T.eq("&#233; decodes to UTF-8 e-acute", eacute.Value, string.char(0xC3, 0xA9))
+
+local rsquo = C4:ParseXml("<v>&#8217;</v>")
+T.eq("&#8217; decodes to UTF-8 right single quote", rsquo.Value, string.char(0xE2, 0x80, 0x99))
+
+local apos = C4:ParseXml("<v>&#x27;</v>")
+T.eq("&#x27; decodes to '", apos.Value, "'")
+
+local a = C4:ParseXml("<v>&#x41;</v>")
+T.eq("&#x41; decodes to A", a.Value, "A")
+
+local big = C4:ParseXml("<v>&#99999999;</v>")
+T.eq("&#99999999; stays literal", big.Value, "&#99999999;")
+
+local zero = C4:ParseXml("<v>&#0;</v>")
+T.eq("&#0; stays literal", zero.Value, "&#0;")
+
 --------------------------------------------------------------------------------
 
 T.finish()

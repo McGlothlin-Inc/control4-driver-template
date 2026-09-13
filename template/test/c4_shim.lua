@@ -656,12 +656,42 @@ end
 --- No mixed content, CDATA or namespaces.
 local XML_ENTITIES = { lt = "<", gt = ">", amp = "&", quot = '"', apos = "'" }
 
+local function utf8_encode(cp)
+  if cp < 0 or cp > 0x10FFFF then
+    return nil
+  end
+  if cp < 0x80 then
+    return string.char(cp)
+  elseif cp < 0x800 then
+    return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + (cp % 0x40))
+  elseif cp < 0x10000 then
+    return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + (math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40))
+  else
+    return string.char(
+      0xF0 + math.floor(cp / 0x40000),
+      0x80 + (math.floor(cp / 0x1000) % 0x40),
+      0x80 + (math.floor(cp / 0x40) % 0x40),
+      0x80 + (cp % 0x40)
+    )
+  end
+end
+
 local function xml_unescape(text)
   return (
     text:gsub("&(#?%w+);", function(entity)
       if entity:sub(1, 1) == "#" then
-        local code = tonumber(entity:sub(2))
-        return code and string.char(code) or ("&" .. entity .. ";")
+        local numStr = entity:sub(2)
+        local isHex = numStr:sub(1, 1) == "x" or numStr:sub(1, 1) == "X"
+        local cp = nil
+        if isHex then
+          cp = tonumber(numStr:sub(2), 16)
+        else
+          cp = tonumber(numStr, 10)
+        end
+        if cp and cp > 0 and cp <= 0x10FFFF and not (cp >= 0xD800 and cp <= 0xDFFF) then
+          return utf8_encode(cp)
+        end
+        return ("&" .. entity .. ";")
       end
       return XML_ENTITIES[entity] or ("&" .. entity .. ";")
     end)
