@@ -669,6 +669,24 @@ T.check("the C4.ParseXml(C4, xml) calling style works", C4.ParseXml(C4, "<x/>").
 T.check("an empty string yields nil", C4:ParseXml("") == nil)
 T.check("a non-string yields nil", C4:ParseXml(nil) == nil)
 
+-- Text content tests
+local soap = C4:ParseXml('<c4soap><param name="LEVEL">42</param><param name="MODE">HEAT</param></c4soap>')
+local args = {}
+for _, v in pairs(soap.ChildNodes) do
+  args[v.Attributes.name] = v.Value
+end
+T.eq("text content exposed as Value", args.LEVEL, "42")
+T.eq("text content exposed as Value", args.MODE, "HEAT")
+
+local selfClose = C4:ParseXml("<x/>")
+T.eq("self-closing node has no Value", selfClose.Value, nil)
+
+local withChildren = C4:ParseXml("<a><b/></a>")
+T.eq("node with children has no Value", withChildren.Value, nil)
+
+local escaped = C4:ParseXml("<v>a &amp; b</v>")
+T.eq("entity-unescaped text content", escaped.Value, "a & b")
+
 --------------------------------------------------------------------------------
 
 T.finish()

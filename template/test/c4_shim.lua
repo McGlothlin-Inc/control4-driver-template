@@ -716,7 +716,12 @@ local function xml_parse_children(body)
       end
 
       local inner = closeStart and body:sub(openEnd + 1, closeStart - 1) or ""
-      nodes[#nodes + 1] = { Name = name, Attributes = xml_attributes(rest), ChildNodes = xml_parse_children(inner) }
+      local childNodes = xml_parse_children(inner)
+      local node = { Name = name, Attributes = xml_attributes(rest), ChildNodes = childNodes }
+      if #childNodes == 0 and inner:match("^%s*$") == nil then
+        node.Value = xml_unescape(inner)
+      end
+      nodes[#nodes + 1] = node
       pos = closeEnd and (closeEnd + 1) or (openEnd + 1)
     end
   end
