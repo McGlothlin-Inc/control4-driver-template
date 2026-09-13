@@ -665,7 +665,9 @@ local nested = C4:ParseXml("<a><a><b/></a><b/></a>")
 T.check("same-name nesting closes at the matching depth", nested ~= nil and #nested.ChildNodes == 2)
 T.check("the inner node keeps its own child", nested ~= nil and #nested.ChildNodes[1].ChildNodes == 1)
 
-T.check("the C4.ParseXml(C4, xml) calling style works", C4.ParseXml(C4, "<x/>").Name == "x")
+T.check("C4:ParseXml colon call works", C4:ParseXml("<x/>").Name == "x")
+T.check("C4.ParseXml with C4 receiver works", C4.ParseXml(C4, "<x/>").Name == "x")
+T.check("C4.ParseXml dot call with string works", C4.ParseXml("<x/>").Name == "x")
 T.check("an empty string yields nil", C4:ParseXml("") == nil)
 T.check("a non-string yields nil", C4:ParseXml(nil) == nil)
 

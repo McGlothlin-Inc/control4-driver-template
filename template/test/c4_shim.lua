@@ -728,10 +728,10 @@ local function xml_parse_children(body)
   return nodes
 end
 
--- Handle both C4:ParseXml() and C4.ParseXml(C4, ...) calling styles
+-- Handle both C4:ParseXml() and C4.ParseXml(...) calling styles
 function C4:ParseXml(xml, ...)
-  if type(xml) == "table" and xml == C4 then
-    xml = select(1, ...)
+  if type(self) == "string" and xml == nil then
+    xml = self
   end
   if type(xml) ~= "string" or xml == "" then
     return nil
