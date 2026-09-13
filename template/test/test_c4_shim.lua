@@ -689,6 +689,22 @@ T.eq("node with children has no Value", withChildren.Value, nil)
 local escaped = C4:ParseXml("<v>a &amp; b</v>")
 T.eq("entity-unescaped text content", escaped.Value, "a & b")
 
+-- Quote-aware tag scanning tests
+local quoteAttr = C4:ParseXml('<rule cond="a > b" other="z"/>')
+T.check(
+  "unescaped > in double-quoted attr",
+  quoteAttr ~= nil and quoteAttr.Attributes.cond == "a > b" and quoteAttr.Attributes.other == "z"
+)
+
+local gtEntity = C4:ParseXml('<rule cond="a &gt; b"/>')
+T.check("gt entity unescapes to >", gtEntity ~= nil and gtEntity.Attributes.cond == "a > b")
+
+local pairedWithGt = C4:ParseXml('<r a=">"><c/></r>')
+T.check(
+  "paired tag with > in attr finds child",
+  pairedWithGt ~= nil and #pairedWithGt.ChildNodes == 1 and pairedWithGt.ChildNodes[1].Name == "c"
+)
+
 --------------------------------------------------------------------------------
 
 T.finish()

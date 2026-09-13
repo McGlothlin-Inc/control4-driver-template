@@ -651,8 +651,8 @@ end
 
 --- Minimal XML parser mirroring what C4:ParseXml returns: a node with Attributes
 --- (name -> value) and ChildNodes (ordered). Attribute values are entity-unescaped
---- so nested XML carried in an attribute (preset_fields) is re-parsable; because
---- markup inside attributes is always escaped, scanning to the first '>' is safe.
+--- so nested XML carried in an attribute (preset_fields) is re-parsable; the
+--- quote-aware scanner skips '>' inside quoted attribute values.
 --- No mixed content, CDATA or namespaces.
 local XML_ENTITIES = { lt = "<", gt = ">", amp = "&", quot = '"', apos = "'" }
 
@@ -681,49 +681,102 @@ local function xml_attributes(raw)
   return attrs
 end
 
+local function find_next_tag(body, start_pos)
+  local tagStart = body:find("<", start_pos)
+  if not tagStart then
+    return nil
+  end
+  local i = tagStart + 1
+  local len = #body
+  while i <= len do
+    local ch = body:sub(i, i)
+    if ch == ">" then
+      return tagStart, i
+    elseif ch == '"' or ch == "'" then
+      local quote = ch
+      i = i + 1
+      while i <= len do
+        if body:sub(i, i) == quote then
+          break
+        end
+        i = i + 1
+      end
+    end
+    i = i + 1
+  end
+  return nil
+end
+
 local function xml_parse_children(body)
   local nodes = {}
   local pos = 1
   while true do
-    local openStart, openEnd, name, rest = body:find("<([%w_:%-%.]+)(.-)>", pos)
+    local openStart, openEnd = find_next_tag(body, pos)
     if not openStart then
       break
     end
+    local afterOpen = body:sub(openStart + 1, openEnd - 1)
+    local closingSlash = afterOpen:sub(1, 1) == "/"
+    local rest = closingSlash and afterOpen:sub(2) or afterOpen
+    local nameMatch = rest:match("^([%w_:%-%.]+)")
+    if not nameMatch then
+      pos = openEnd + 1
+      goto next_iter
+    end
+    local name = nameMatch
+    local tagRest = rest:sub(#name + 1)
 
-    if rest:sub(-1) == "/" then
-      nodes[#nodes + 1] = { Name = name, Attributes = xml_attributes(rest:sub(1, -2)), ChildNodes = {} }
+    if closingSlash then
+      pos = openEnd + 1
+      goto next_iter
+    end
+
+    if tagRest:sub(-1) == "/" then
+      nodes[#nodes + 1] = { Name = name, Attributes = xml_attributes(tagRest:sub(1, -2)), ChildNodes = {} }
       pos = openEnd + 1
     else
       -- Walk to the matching close tag, counting same-name nesting.
       local depth, searchPos, closeStart, closeEnd = 1, openEnd + 1, nil, nil
       while true do
-        local tagStart, tagEnd, closing, tagName, tagRest = body:find("<(/?)([%w_:%-%.]+)(.-)>", searchPos)
+        local tagStart, tagEnd = find_next_tag(body, searchPos)
         if not tagStart then
           break
         end
+        local inner = body:sub(tagStart + 1, tagEnd - 1)
+        local isClosing = inner:sub(1, 1) == "/"
+        local restTag = isClosing and inner:sub(2) or inner
+        local tagName = restTag:match("^([%w_:%-%.]+)")
+        if not tagName then
+          searchPos = tagEnd + 1
+          goto next_search
+        end
         if tagName == name then
-          if closing == "/" then
+          if isClosing then
             depth = depth - 1
             if depth == 0 then
               closeStart, closeEnd = tagStart, tagEnd
               break
             end
-          elseif tagRest:sub(-1) ~= "/" then
-            depth = depth + 1
+          else
+            if restTag:sub(-1) ~= "/" then
+              depth = depth + 1
+            end
           end
         end
+        ::next_search::
         searchPos = tagEnd + 1
       end
 
       local inner = closeStart and body:sub(openEnd + 1, closeStart - 1) or ""
       local childNodes = xml_parse_children(inner)
-      local node = { Name = name, Attributes = xml_attributes(rest), ChildNodes = childNodes }
+      local node = { Name = name, Attributes = xml_attributes(tagRest), ChildNodes = childNodes }
       if #childNodes == 0 and inner:match("^%s*$") == nil then
         node.Value = xml_unescape(inner)
       end
       nodes[#nodes + 1] = node
       pos = closeEnd and (closeEnd + 1) or (openEnd + 1)
     end
+    ::next_iter::
   end
   return nodes
 end
