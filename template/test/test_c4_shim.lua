@@ -667,9 +667,12 @@ T.check("the inner node keeps its own child", nested ~= nil and #nested.ChildNod
 
 T.check("C4:ParseXml colon call works", C4:ParseXml("<x/>").Name == "x")
 T.check("C4.ParseXml with C4 receiver works", C4.ParseXml(C4, "<x/>").Name == "x")
-T.check("C4.ParseXml dot call with string works", C4.ParseXml("<x/>").Name == "x")
+local ok, err = pcall(C4.ParseXml, "<x/>")
+T.check("C4.ParseXml without a receiver raises as on Director", not ok and tostring(err):find("LuaC4Object expected"))
 T.check("an empty string yields nil", C4:ParseXml("") == nil)
-T.check("a non-string yields nil", C4:ParseXml(nil) == nil)
+T.check("a number is accepted as its string form", C4:ParseXml(123) == nil)
+ok, err = pcall(C4.ParseXml, C4, nil)
+T.check("a nil argument raises as on Director", not ok and tostring(err):find("strXml should be a string"))
 
 -- Text content tests
 local soap = C4:ParseXml('<c4soap><param name="LEVEL">42</param><param name="MODE">HEAT</param></c4soap>')
@@ -677,17 +680,43 @@ local args = {}
 for _, v in pairs(soap.ChildNodes) do
   args[v.Attributes.name] = v.Value
 end
-T.eq("text content exposed as Value", args.LEVEL, "42")
-T.eq("text content exposed as Value", args.MODE, "HEAT")
+T.eq("text content exposed as Value (LEVEL)", args.LEVEL, "42")
+T.eq("text content exposed as Value (MODE)", args.MODE, "HEAT")
+
+-- Director sets Value on every node, "" when there is no text, so an empty
+-- <param> reaches ReceivedFromProxy as a present key rather than a missing one.
+-- Expectations below were measured on a controller.
+local emptyParam = C4:ParseXml('<c4soap><param name="X"></param></c4soap>')
+T.eq("an empty paired node has an empty Value", emptyParam.ChildNodes[1].Value, "")
 
 local selfClose = C4:ParseXml("<x/>")
-T.eq("self-closing node has no Value", selfClose.Value, nil)
+T.eq("a self-closing node has an empty Value", selfClose.Value, "")
 
 local withChildren = C4:ParseXml("<a><b/></a>")
-T.eq("node with children has no Value", withChildren.Value, nil)
+T.eq("a node with children has an empty Value", withChildren.Value, "")
+
+local blank = C4:ParseXml("<a>  \n\t </a>")
+T.eq("whitespace-only content collapses to an empty Value", blank.Value, "")
+
+local mixed = C4:ParseXml("<a>lead<b/>tail</a>")
+T.eq("mixed content keeps the first text run", mixed.Value, "lead")
+T.eq("mixed content still yields the child", #mixed.ChildNodes, 1)
+T.eq("text after a child is the Value when no text precedes it", C4:ParseXml("<a><b/>tail</a>").Value, "tail")
+
+local cdata = C4:ParseXml("<a><![CDATA[x < y]]></a>")
+T.eq("a CDATA section is the Value, unescaped", cdata.Value, "x < y")
+T.eq("a CDATA section is not a child", #cdata.ChildNodes, 0)
+T.eq("blank text before a CDATA section is skipped", C4:ParseXml("<a>  <![CDATA[x]]>  </a>").Value, "x")
+T.eq("text before a CDATA section wins", C4:ParseXml("<a>x<![CDATA[<y>]]>z</a>").Value, "x")
+T.eq("an unterminated CDATA section yields nil", C4:ParseXml("<a><![CDATA[x</a>"), nil)
 
 local escaped = C4:ParseXml("<v>a &amp; b</v>")
 T.eq("entity-unescaped text content", escaped.Value, "a & b")
+
+T.eq("a mismatched close tag yields nil for the document", C4:ParseXml("<a><b></a>"), nil)
+T.eq("an unquoted attribute value yields nil", C4:ParseXml("<a b=x/>"), nil)
+T.eq("attributes without whitespace between them yield nil", C4:ParseXml('<a b="x"c="y"/>'), nil)
+T.eq("a repeated attribute keeps the last value", C4:ParseXml('<a y="1" y="2"/>').Attributes.y, "2")
 
 -- Quote-aware tag scanning tests
 local quoteAttr = C4:ParseXml('<rule cond="a > b" other="z"/>')
@@ -698,6 +727,9 @@ T.check(
 
 local gtEntity = C4:ParseXml('<rule cond="a &gt; b"/>')
 T.check("gt entity unescapes to >", gtEntity ~= nil and gtEntity.Attributes.cond == "a > b")
+
+local multiline = C4:ParseXml('<a b="line1\nline2"/>')
+T.eq("a newline in an attribute value normalizes to a space", multiline.Attributes.b, "line1 line2")
 
 local pairedWithGt = C4:ParseXml('<r a=">"><c/></r>')
 T.check(
@@ -719,10 +751,15 @@ local a = C4:ParseXml("<v>&#x41;</v>")
 T.eq("&#x41; decodes to A", a.Value, "A")
 
 local big = C4:ParseXml("<v>&#99999999;</v>")
-T.eq("&#99999999; stays literal", big.Value, "&#99999999;")
+T.eq("&#99999999; encodes to Director's four bytes", big.Value, string.char(0xFD, 0x9E, 0x83, 0xBF))
+
+local surrogate = C4:ParseXml("<v>&#xD800;</v>")
+T.eq("&#xD800; encodes to Director's three bytes", surrogate.Value, string.char(0xED, 0xA0, 0x80))
 
 local zero = C4:ParseXml("<v>&#0;</v>")
-T.eq("&#0; stays literal", zero.Value, "&#0;")
+T.eq("&#0; is dropped", zero.Value, "")
+
+T.eq("a malformed reference stays literal", C4:ParseXml("<v>&#;</v>").Value, "&#;")
 
 --------------------------------------------------------------------------------
 

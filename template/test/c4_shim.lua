@@ -649,17 +649,18 @@ function C4:ColorRGBtoHSV(r, g, b)
   return h, s, mx * 100
 end
 
---- Minimal XML parser mirroring what C4:ParseXml returns: a node with Attributes
---- (name -> value) and ChildNodes (ordered). Attribute values are entity-unescaped
---- so nested XML carried in an attribute (preset_fields) is re-parsable; the
---- quote-aware scanner skips '>' inside quoted attribute values.
---- No mixed content, CDATA or namespaces.
+--- Minimal XML parser returning what C4:ParseXml returns, measured on a
+--- controller: a node with Name, Attributes (name -> value), ChildNodes
+--- (ordered) and Value, the node's first non-blank text run or first CDATA
+--- section, "" when there is neither. Attribute values are whitespace-normalized
+--- and entity-unescaped so nested XML carried in an attribute (preset_fields) is
+--- re-parsable. A malformed or unbalanced document yields nil as a whole.
 local XML_ENTITIES = { lt = "<", gt = ">", amp = "&", quot = '"', apos = "'" }
 
+-- Director's encoder byte for byte: no range or surrogate check, and the lead
+-- byte of a 4-byte sequence is truncated to 8 bits, so &#99999999; yields
+-- FD 9E 83 BF and &#xD800; yields ED A0 80 exactly as on a controller.
 local function utf8_encode(cp)
-  if cp < 0 or cp > 0x10FFFF then
-    return nil
-  end
   if cp < 0x80 then
     return string.char(cp)
   elseif cp < 0x800 then
@@ -668,7 +669,7 @@ local function utf8_encode(cp)
     return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + (math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40))
   else
     return string.char(
-      0xF0 + math.floor(cp / 0x40000),
+      0xF0 + (math.floor(cp / 0x40000) % 16),
       0x80 + (math.floor(cp / 0x1000) % 0x40),
       0x80 + (math.floor(cp / 0x40) % 0x40),
       0x80 + (cp % 0x40)
@@ -688,7 +689,9 @@ local function xml_unescape(text)
         else
           cp = tonumber(numStr, 10)
         end
-        if cp and cp > 0 and cp <= 0x10FFFF and not (cp >= 0xD800 and cp <= 0xDFFF) then
+        if cp == 0 then
+          return ""
+        elseif cp then
           return utf8_encode(cp)
         end
         return ("&" .. entity .. ";")
@@ -698,23 +701,50 @@ local function xml_unescape(text)
   )
 end
 
+-- Literal tab, LF and CR in an attribute value become a space before entity
+-- expansion, so a character reference to one of them survives.
+local function xml_attribute_value(raw)
+  return xml_unescape((raw:gsub("\r\n", "\n"):gsub("[\t\n\r]", " ")))
+end
+
+--- Attributes of one tag, last duplicate winning. nil when the tag is malformed
+--- (unquoted value, missing whitespace between attributes), which Director
+--- rejects along with the whole document.
 local function xml_attributes(raw)
-  local attrs = {}
-  for name, value in raw:gmatch('([%w_:%-%.]+)%s*=%s*"([^"]*)"') do
-    attrs[name] = xml_unescape(value)
-  end
-  for name, value in raw:gmatch("([%w_:%-%.]+)%s*=%s*'([^']*)'") do
-    if attrs[name] == nil then
-      attrs[name] = xml_unescape(value)
+  local attrs, pos = {}, 1
+  while true do
+    local _, e, name, quote = raw:find("^%s*([%w_:%-%.]+)%s*=%s*([\"'])", pos)
+    if not e then
+      break
     end
+    local close = raw:find(quote, e + 1, true)
+    if not close then
+      return nil
+    end
+    attrs[name] = xml_attribute_value(raw:sub(e + 1, close - 1))
+    pos = close + 1
+    if pos <= #raw and not raw:sub(pos, pos):match("%s") then
+      return nil
+    end
+  end
+  if not raw:sub(pos):match("^%s*$") then
+    return nil
   end
   return attrs
 end
 
+--- Bounds of the next markup item: an element tag, or a whole CDATA section.
 local function find_next_tag(body, start_pos)
   local tagStart = body:find("<", start_pos)
   if not tagStart then
     return nil
+  end
+  if body:sub(tagStart, tagStart + 8) == "<![CDATA[" then
+    local close = body:find("]]>", tagStart + 9, true)
+    if not close then
+      return nil
+    end
+    return tagStart, close + 2
   end
   local i = tagStart + 1
   local len = #body
@@ -737,90 +767,117 @@ local function find_next_tag(body, start_pos)
   return nil
 end
 
+--- Splits the text between a tag's angle brackets into (isClosing, name, rest).
+--- name is nil for the prolog, DOCTYPE, CDATA and anything else that is not an
+--- element tag.
+local function xml_tag_parts(tag)
+  local isClosing = tag:sub(1, 1) == "/"
+  local rest = isClosing and tag:sub(2) or tag
+  local name = rest:match("^([%w_:%-%.]+)")
+  return isClosing, name, name and rest:sub(#name + 1) or rest
+end
+
+--- Bounds of the close tag pairing the open tag of `name` whose content starts
+--- at start_pos, tracking every element opened in between. nil when a close tag
+--- is missing or mismatched.
+local function find_matching_close(body, start_pos, name)
+  local stack = { name }
+  local pos = start_pos
+  while true do
+    local tagStart, tagEnd = find_next_tag(body, pos)
+    if not tagStart then
+      return nil
+    end
+    local isClosing, tagName, tagRest = xml_tag_parts(body:sub(tagStart + 1, tagEnd - 1))
+    if tagName then
+      if isClosing then
+        if stack[#stack] ~= tagName then
+          return nil
+        end
+        stack[#stack] = nil
+        if #stack == 0 then
+          return tagStart, tagEnd
+        end
+      elseif tagRest:sub(-1) ~= "/" then
+        stack[#stack + 1] = tagName
+      end
+    end
+    pos = tagEnd + 1
+  end
+end
+
+--- Element children of body in document order, plus the Value Director gives the
+--- enclosing node: its first non-blank text run or first CDATA section, "" when
+--- there is neither. Returns nil when body is unbalanced.
 local function xml_parse_children(body)
-  local nodes = {}
+  local nodes, value = {}, nil
   local pos = 1
+  local function take_text(stop)
+    local text = body:sub(pos, stop - 1)
+    if value == nil and not text:match("^%s*$") then
+      value = xml_unescape(text)
+    end
+  end
   while true do
     local openStart, openEnd = find_next_tag(body, pos)
     if not openStart then
+      take_text(#body + 1)
       break
     end
-    local afterOpen = body:sub(openStart + 1, openEnd - 1)
-    local closingSlash = afterOpen:sub(1, 1) == "/"
-    local rest = closingSlash and afterOpen:sub(2) or afterOpen
-    local nameMatch = rest:match("^([%w_:%-%.]+)")
-    if not nameMatch then
+    take_text(openStart)
+    local tag = body:sub(openStart + 1, openEnd - 1)
+    local isClosing, name, tagRest = xml_tag_parts(tag)
+    if tag:sub(1, 8) == "![CDATA[" then
+      if value == nil then
+        value = tag:sub(9, -3)
+      end
       pos = openEnd + 1
-      goto next_iter
-    end
-    local name = nameMatch
-    local tagRest = rest:sub(#name + 1)
-
-    if closingSlash then
+    elseif not name then
       pos = openEnd + 1
-      goto next_iter
-    end
-
-    if tagRest:sub(-1) == "/" then
-      nodes[#nodes + 1] = { Name = name, Attributes = xml_attributes(tagRest:sub(1, -2)), ChildNodes = {} }
+    elseif isClosing then
+      return nil
+    elseif tagRest:sub(-1) == "/" then
+      local attrs = xml_attributes(tagRest:sub(1, -2))
+      if not attrs then
+        return nil
+      end
+      nodes[#nodes + 1] = { Name = name, Attributes = attrs, ChildNodes = {}, Value = "" }
       pos = openEnd + 1
     else
-      -- Walk to the matching close tag, counting same-name nesting.
-      local depth, searchPos, closeStart, closeEnd = 1, openEnd + 1, nil, nil
-      while true do
-        local tagStart, tagEnd = find_next_tag(body, searchPos)
-        if not tagStart then
-          break
-        end
-        local inner = body:sub(tagStart + 1, tagEnd - 1)
-        local isClosing = inner:sub(1, 1) == "/"
-        local restTag = isClosing and inner:sub(2) or inner
-        local tagName = restTag:match("^([%w_:%-%.]+)")
-        if not tagName then
-          searchPos = tagEnd + 1
-          goto next_search
-        end
-        if tagName == name then
-          if isClosing then
-            depth = depth - 1
-            if depth == 0 then
-              closeStart, closeEnd = tagStart, tagEnd
-              break
-            end
-          else
-            if restTag:sub(-1) ~= "/" then
-              depth = depth + 1
-            end
-          end
-        end
-        ::next_search::
-        searchPos = tagEnd + 1
+      local attrs = xml_attributes(tagRest)
+      local closeStart, closeEnd = find_matching_close(body, openEnd + 1, name)
+      if not attrs or not closeStart then
+        return nil
       end
-
-      local inner = closeStart and body:sub(openEnd + 1, closeStart - 1) or ""
-      local childNodes = xml_parse_children(inner)
-      local node = { Name = name, Attributes = xml_attributes(tagRest), ChildNodes = childNodes }
-      if #childNodes == 0 and inner:match("^%s*$") == nil then
-        node.Value = xml_unescape(inner)
+      local childNodes, childValue = xml_parse_children(body:sub(openEnd + 1, closeStart - 1))
+      if not childNodes then
+        return nil
       end
-      nodes[#nodes + 1] = node
-      pos = closeEnd and (closeEnd + 1) or (openEnd + 1)
+      nodes[#nodes + 1] = { Name = name, Attributes = attrs, ChildNodes = childNodes, Value = childValue }
+      pos = closeEnd + 1
     end
-    ::next_iter::
   end
-  return nodes
+  return nodes, value or ""
 end
 
--- Handle both C4:ParseXml() and C4.ParseXml(...) calling styles
-function C4:ParseXml(xml, ...)
-  if type(self) == "string" and xml == nil then
-    xml = self
+-- Argument checks and messages are Director's: a number is accepted as its
+-- string form, anything else that is not a string raises.
+function C4:ParseXml(xml)
+  if self ~= C4 then
+    error("LuaC4Object expected, got " .. type(self), 2)
   end
-  if type(xml) ~= "string" or xml == "" then
+  if type(xml) == "number" then
+    xml = tostring(xml)
+  end
+  if type(xml) ~= "string" then
+    error("strXml should be a string", 2)
+  end
+  if xml == "" then
     return nil
   end
   local body = xml:gsub("<%?.-%?>", ""):gsub("<!%-%-.-%-%->", "")
-  return xml_parse_children(body)[1]
+  local nodes = xml_parse_children(body)
+  return nodes and nodes[1] or nil
 end
 
 --- Generate a UUID (simplified version)
